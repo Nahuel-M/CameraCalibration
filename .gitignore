@@ -1,0 +1,12 @@
+
+calibrationBackup/
+
+calibrationImgs/
+
+Plots/
+
+*.jpg
+
+x64/
+
+*.dll
