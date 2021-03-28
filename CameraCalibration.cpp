@@ -49,7 +49,7 @@ std::vector<cv::Point3f> generateChessGrid(cv::Mat_<float> doF)
             float sinc = sin(doF(5));
             float   Px = doF(0) + j * square_size * cosa * cosb +   i * square_size * (cosa * sinb * sinc - sina * cosc),
                     Py = doF(1) + j * square_size * sina * cosb +   i * square_size * (sina * sinb * sinc + cosa * cosc),
-                    Pz = doF(2) + j * square_size * -sinb +         i * square_size * cosb * cosc;
+                    Pz = doF(2) + j * square_size * -sinb +         i * square_size * cosb * sinc;
 
             points3D.push_back({ Px, Py, Pz });
         }
@@ -139,7 +139,7 @@ Mat_<float> getGradient(Mat_<float>& doF, std::vector<Point2f>& points, bool ver
     std::vector<Point2f> points2D = projectChessGrid(generateChessGrid(doF));
     for (int d = 0; d < doF.cols; d++) {
         gradient(d) = subGradientNumerical(doF, points, d, 0.0001);
-        //if (d < 3) { gradient(d) *= 30; }
+        if (d >= 2) { gradient(d) *= 10; }
         //if (d == 2){ gradient(d) /= 50; }
     }
     if (verbose) {
@@ -186,7 +186,7 @@ void analyzeGradient(Mat_<float>& doF, Mat_<float>& doFstep, std::vector<Point2f
     {
         plt::plot(value, error, "r");
         //plt::plot(value, gradient, "r--");
-        plt::ylim(minError, maxError);
+        plt::ylim(minError, minError *1.5f);
     }
    
 }
@@ -200,7 +200,7 @@ void gradientDescentStep(Mat_<float>& doF, std::vector<Point2f>& points,float al
 
     float error = getError(doF, points);
     //learningConsistency = (gradient.mul(prevGradient)>0);
-    float dampening = error/(5000 + error);
+    float dampening = error/(15000 + error);
     doF -= gradient * dampening * alpha;
     if (verbose) {
         std::cout << "Gradient: " << gradient << std::endl;
@@ -250,16 +250,20 @@ Mat_<float> minimizeErrorWithDoF(Mat_<float>& doF, std::vector<Point2f>& points,
 }
 
 void dofGradient(Mat_<float>& doF, std::vector<Point2f>& points) {
-    plt::figure();
+    plt::figure(1);
+    plt::clf();
     plt::suptitle("Error vs doF value");
     for (int d = 0; d < doF.cols; d++) {
         plt::subplot(2, 3, d + 1);
         Mat_<float> doFstep{ doF.size() };
         doFstep << 0, 0, 0, 0, 0, 0, 0, 0, 0;
-        doFstep(d) = 0.02;// getGradient(doF, points)(d) / 30000;
+        if (d < 3) { doFstep(d) = 0.00005; }
+        else { doFstep(d) = 0.001; }
+        //doFstep(d) = 0.002;// getGradient(doF, points)(d) / 30000;
         analyzeGradient(doF, doFstep, points, 200, to_string(d), d);
     }
-    plt::show();
+    plt::show(true);
+    //plt::pause(1);
 }
 
 void setup_calibration(int board_width, int board_height, float square_size, vector<string>& images) {
@@ -362,23 +366,24 @@ int main()
 
 
         Mat_<float> doF{ Size(6,1) };
-        doF << 0, 0, 0.75,
-                0, 0, 0;
+        //doF << 0, 0, 0.75,
+                //0, 0, 0;
+        doF << 0.34649482, 0.19480404, 0.79643202, -0.092880823, 0.28439859, 0.34745118;
         std::cout << "doF: " << doF << std::endl;
 
-
+        plotPerformance(projectChessGrid(generateChessGrid(doF)), points);
         dofGradient(doF, points);
 
-        float alpha = 1e-2;
+        float alpha = 1e-3;
         /// Perform initial gradient descent
-        for (int i = 0; i < 80; i++) {
+        for (int i = 0; i < 1600; i++) {
             float stepSize = 0.02;
             //doF = minimizeErrorWithDoF(doF, points, stepSize, 200);
-            std::cout << doF << std::endl;
+            //std::cout << doF << std::endl;
             gradientDescentStep(doF, points, alpha, true);
             //waitKey(0);
-            plotPerformance(projectChessGrid(generateChessGrid(doF)), points);
-            dofGradient(doF, points);
+            //plotPerformance(projectChessGrid(generateChessGrid(doF)), points);
+            //dofGradient(doF, points);
         }
         vector<Point2f> points2D = projectChessGrid(generateChessGrid(doF));
 
@@ -389,9 +394,10 @@ int main()
         for (int a = 0; a < points2D.size(); a++) {
             error += norm(points2D[a] - points[a]) / board_height / board_width;
         }
-        if (error > 10) {
+        if (error > 1) {
             for (int i = 0; i < 800; i++) {
                 gradientDescentStep(doF, points, alpha, true);
+                plotPerformance(projectChessGrid(generateChessGrid(doF)), points);
                 dofGradient(doF, points);
             }
         }
