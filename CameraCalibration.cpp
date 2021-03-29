@@ -101,6 +101,7 @@ void plotPerformance(std::vector<cv::Point2f> points2D, std::vector<cv::Point2f>
             cv::line(plot, goal[i], points2D[i], 150, 5);
         }
     }
+
     cv::namedWindow("Performance", cv::WindowFlags::WINDOW_NORMAL);
     cv::imshow("Performance", plot);
 }
@@ -186,7 +187,7 @@ void analyzeGradient(Mat_<float>& doF, Mat_<float>& doFstep, std::vector<Point2f
     {
         plt::plot(value, error, "r");
         //plt::plot(value, gradient, "r--");
-        plt::ylim(minError, minError *1.5f);
+        //plt::ylim(minError, minError *1.5f);
     }
    
 }
@@ -200,14 +201,13 @@ void gradientDescentStep(Mat_<float>& doF, std::vector<Point2f>& points,float al
 
     float error = getError(doF, points);
     //learningConsistency = (gradient.mul(prevGradient)>0);
-    float dampening = error/(15000 + error);
+    float dampening = error/(13000 + error);
     doF -= gradient * dampening * alpha;
     if (verbose) {
         std::cout << "Gradient: " << gradient << std::endl;
         std::cout << "Dampening: " << dampening << ", error: " << error << std::endl;
         std::cout << "doF: " << doF << std::endl;
     }
-
     // Normalize i and j vectors to square_size
     //float iNorm = cv::pow(doF(3) * doF(3) + doF(4) * doF(4) + doF(5) * doF(5), 0.5);
     //doF(3) *= square_size / iNorm;
@@ -339,63 +339,61 @@ int main()
     //return 1;
 
     /// Read 2d pattern points from file
-    FileStorage file("Points", FileStorage::READ);
+    //FileStorage file("Points", FileStorage::READ);
+    //file["image_points"] >> image_points;
     //file["object_points"] >> object_points;
-    file["image_points"] >> image_points;
+    std::vector< std::vector< Point2f > > undistorted_image_points;
+    FileStorage undist("UndistortedPoints", FileStorage::READ);
+    undist["points"] >> undistorted_image_points;
 
     /// Read intrinsic camera calibration info from file
     FileStorage fs("CalibrationFile2", FileStorage::READ);
     fs["K"] >> K;
     fs["D"] >> D;
     
+    /// Undistort detected 2D points
+    //for (auto pointsDist : image_points) {
+    //    vector<Point2f> points;
+    //    undistortPoints(pointsDist, points, K, D);
+    //    for (int i = 0; i < points.size(); i++) {
+    //        points[i] = Point2f{ points[i].x * imageSize.width + imageSize.width / 2, points[i].y * imageSize.height + imageSize.height / 2 };
+    //    }
+    //    undistorted_image_points.push_back(points);
+    //}
+    //FileStorage undist("UndistortedPoints", FileStorage::WRITE);
+    //undist << "points" << undistorted_image_points;
+    //undist.release();
+
     FileStorage campos("campos", FileStorage::WRITE);
     vector<Mat> doFs;
     vector<float> errors;
-
-
-    for (auto pointsDist : image_points) {
-        std::cout << "new point" << std::endl;
-        /// Undistort detected 2D points
-        vector<Point2f> points;
-        undistortPoints(pointsDist, points, K, D);
-        for (int i = 0; i < points.size(); i++) {
-            points[i] = Point2f{ points[i].x * imageSize.width + imageSize.width / 2, points[i].y * imageSize.height + imageSize.height / 2 };
-        }
-        Point2f centerTargetPoint = points[(points.size() - 1) / 2];
-        Point2f zOxy = Point2f{ 0.75f / centerTargetPoint.x, 0.75f / centerTargetPoint.y } * f / pixelSize;
-
+    int counter = 1;
+    for (std::vector< Point2f > points : undistorted_image_points) {
+        std::cout << "Point: " << counter << std::endl;
+        counter++;
 
         Mat_<float> doF{ Size(6,1) };
         //doF << 0, 0, 0.75,
                 //0, 0, 0;
-        doF << 0.34649482, 0.19480404, 0.79643202, -0.092880823, 0.28439859, 0.34745118;
-        std::cout << "doF: " << doF << std::endl;
+        doF << 0.34649482, 0.19480404, 0.79643202, -0.092996247, 0.30407393, 0.37667418;
 
-        plotPerformance(projectChessGrid(generateChessGrid(doF)), points);
-        dofGradient(doF, points);
+        //plotPerformance(projectChessGrid(generateChessGrid(doF)), points);
+        //dofGradient(doF, points);
 
         float alpha = 1e-3;
         /// Perform initial gradient descent
-        for (int i = 0; i < 1600; i++) {
-            float stepSize = 0.02;
-            //doF = minimizeErrorWithDoF(doF, points, stepSize, 200);
+        for (int i = 0; i < 2000; i++) {
+            //doF = minimizeErrorWithDoF(doF, points, 0.02, 200);
             //std::cout << doF << std::endl;
-            gradientDescentStep(doF, points, alpha, true);
+            gradientDescentStep(doF, points, alpha, false);
             //waitKey(0);
             //plotPerformance(projectChessGrid(generateChessGrid(doF)), points);
             //dofGradient(doF, points);
         }
-        vector<Point2f> points2D = projectChessGrid(generateChessGrid(doF));
-
         std::cout << "doF: " << doF << std::endl;
-        Mat_<float> grad = getGradient(doF, points);
-        //std::cout << grad(0) << ", " << grad(1) << std::endl;
-        float error = 0;
-        for (int a = 0; a < points2D.size(); a++) {
-            error += norm(points2D[a] - points[a]) / board_height / board_width;
-        }
-        if (error > 1) {
-            for (int i = 0; i < 800; i++) {
+        float error = getError(doF, points) / board_height / board_width;
+        if (error > 30) {
+            for (int i = 0; i < 10; i++) {
                 gradientDescentStep(doF, points, alpha, true);
                 plotPerformance(projectChessGrid(generateChessGrid(doF)), points);
                 dofGradient(doF, points);
@@ -406,8 +404,8 @@ int main()
         
         std::cout << "Error: " << error << std::endl;
         errors.push_back(error);
-        plotPerformance(points2D, points);
     }
+    
     campos << "doFs" << doFs;
     campos << "rep_err" << errors;
     campos.release();
