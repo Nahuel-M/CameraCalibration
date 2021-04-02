@@ -16,47 +16,49 @@ namespace plt = matplotlibcpp;
 using namespace cv;
 using namespace std;
 
-cv::Mat K;
-cv::Mat D;
-
-std::vector< std::vector< Point3f > > object_points;
 std::vector< std::vector< Point2f > > image_points;
-std::vector< Point2f > corners;
-std::vector< std::vector< Point2f > > left_img_points;
+std::vector< std::vector< Point2f > > undistorted_image_points;
+std::vector< std::vector< Point3f > > object_points; 
+vector<cv::Mat_<float>> doFs;
+vector<cv::Mat_<float>> jointDoFs;
+string imageFolderName;
+string calibrationFolderName = "calibration";
 
-Size imageSize = Size{4056, 3040};
-int board_width = 7, board_height = 5;
-float square_size = 28.7e-3;
+Mat K, D;
+float alpha;
+
+enum class Method {
+    Calculate, Import
+};
+
+Size imageSize;
+int board_width, board_height;
+float square_size;
 double pixelSize = 1.55e-6;
 double f = 6e-3;
+float preMult = f / pixelSize;
 
-Mat gray;
-Size im_size;
-
+/// Generate a chess grid using the degrees of freedom and the board dimensions
 std::vector<cv::Point3f> generateChessGrid(cv::Mat_<float> doF)
 {
     std::vector<cv::Point3f> points3D;
     for (int i = - (board_height - 1) / 2; i <= board_height / 2; i++) {
         for (int j = - (board_width - 1) / 2; j <= board_width / 2; j++) {
-            //float   Px = doF(2) / doF(0) + i * doF(3) + j * doF(6),
-            //        Py = doF(2) / doF(1) + i * doF(4) + j * doF(7),
-            //        Pz = doF(2) + i * doF(5) + j * doF(8);
-            float cosa = cos(doF(3));
-            float cosb = cos(doF(4));
-            float cosc = cos(doF(5));
-            float sina = sin(doF(3));
-            float sinb = sin(doF(4));
-            float sinc = sin(doF(5));
+            float   cosa = cos(doF(3)),
+                    cosb = cos(doF(4)),
+                    cosc = cos(doF(5)),
+                    sina = sin(doF(3)),
+                    sinb = sin(doF(4)),
+                    sinc = sin(doF(5));
             float   Px = doF(0) + j * square_size * cosa * cosb +   i * square_size * (cosa * sinb * sinc - sina * cosc),
                     Py = doF(1) + j * square_size * sina * cosb +   i * square_size * (sina * sinb * sinc + cosa * cosc),
                     Pz = doF(2) + j * square_size * -sinb +         i * square_size * cosb * sinc;
-
             points3D.push_back({ Px, Py, Pz });
         }
     }
     return points3D;
 }
-
+/// Project a chess grid (or any other set of points) to a camera located at O(0,0,0) with no rotation
 std::vector<cv::Point2f> projectChessGrid(std::vector<cv::Point3f> points3D)
 {
     std::vector<cv::Point2f> points2D;
@@ -76,7 +78,8 @@ void plot2Dpoints(std::vector<cv::Point2f>& points2D)
         //std::cout << p << std::endl;
         plot(Rect{ Point2i(p), Size{10,10} }) = 255;
     }
-    cv::namedWindow("Plot", cv::WindowFlags::WINDOW_NORMAL);
+    cv::resize(plot, plot, cv::Size(), 0.25, 0.25);
+    cv::namedWindow("Plot", cv::WindowFlags::WINDOW_AUTOSIZE);
     cv::imshow("Plot", plot);
 }
 
@@ -101,8 +104,8 @@ void plotPerformance(std::vector<cv::Point2f> points2D, std::vector<cv::Point2f>
             cv::line(plot, goal[i], points2D[i], 150, 5);
         }
     }
-
-    cv::namedWindow("Performance", cv::WindowFlags::WINDOW_NORMAL);
+    cv::resize(plot, plot, cv::Size(), 0.25, 0.25);
+    cv::namedWindow("Performance", cv::WindowFlags::WINDOW_AUTOSIZE);
     cv::imshow("Performance", plot);
 }
 
@@ -118,6 +121,7 @@ float getError(Mat_<float>& doF, std::vector<Point2f>& points)
     }
     return error;
 }
+
 float subGradientNumerical(Mat_<float>& doF, std::vector<Point2f>& points, int index, float stepSize)
 {
     float minError = 0;
@@ -139,7 +143,7 @@ Mat_<float> getGradient(Mat_<float>& doF, std::vector<Point2f>& points, bool ver
     gradient = 0;
     std::vector<Point2f> points2D = projectChessGrid(generateChessGrid(doF));
     for (int d = 0; d < doF.cols; d++) {
-        gradient(d) = subGradientNumerical(doF, points, d, 0.0001);
+        gradient(d) = subGradientNumerical(doF, points, d, 0.00001)*3;
         if (d >= 2) { gradient(d) *= 10; }
         //if (d == 2){ gradient(d) /= 50; }
     }
@@ -201,22 +205,50 @@ void gradientDescentStep(Mat_<float>& doF, std::vector<Point2f>& points,float al
 
     float error = getError(doF, points);
     //learningConsistency = (gradient.mul(prevGradient)>0);
-    float dampening = error/(13000 + error);
+    float dampening = error/(10000 + error);
     doF -= gradient * dampening * alpha;
     if (verbose) {
         std::cout << "Gradient: " << gradient << std::endl;
-        std::cout << "Dampening: " << dampening << ", error: " << error << std::endl;
+        std::cout << "Dampening: " << dampening << ", error: " << error / board_height / board_width << std::endl;
         std::cout << "doF: " << doF << std::endl;
     }
-    // Normalize i and j vectors to square_size
-    //float iNorm = cv::pow(doF(3) * doF(3) + doF(4) * doF(4) + doF(5) * doF(5), 0.5);
-    //doF(3) *= square_size / iNorm;
-    //doF(4) *= square_size / iNorm;
-    //doF(5) *= square_size / iNorm;
-    //float jNorm = cv::pow(doF(6) * doF(6) + doF(7) * doF(7) + doF(8) * doF(8), 0.5);
-    //doF(6) *= square_size / jNorm;
-    //doF(7) *= square_size / jNorm;
-    //doF(8) *= square_size / jNorm;
+}
+
+void massGradientDescentStep(std::vector<Mat_<float>>& doFs, std::vector<std::vector<Point2f>>& pointSets, float alpha, bool verbose = false)
+{
+    // Get individual gradient for each camera
+    std::vector<Mat_<float> > gradients(doFs.size());
+    for (int i = 0; i < doFs.size(); i++) {
+        gradients[i] = getGradient(doFs[i], pointSets[i], false);
+    }
+    // Combine to an average gradient
+    Mat_<float> avgGradient{ gradients[0].size() }; 
+    avgGradient = 0;
+    for (int i = 0; i < doFs.size(); i++) {
+        avgGradient += gradients[i];
+    }
+    avgGradient /= doFs.size();
+    // Apply gradients to DoFs. The x and y position are taken from the respective gradients.
+    float avgError = 0;
+    for (int i = 0; i < doFs.size(); i++) {
+        avgError += getError(doFs[i], pointSets[i]) / doFs.size();
+    }
+
+    float dampening = avgError / (10000 + avgError);
+    for (int i = 0; i <doFs.size(); i++) {
+        doFs[i](0) -= gradients[i](0) * alpha * dampening;
+        doFs[i](1) -= gradients[i](1) * alpha * dampening;
+        doFs[i](2) -= avgGradient(2) * alpha * dampening;
+        doFs[i](3) -= avgGradient(3) * alpha * dampening;
+        doFs[i](4) -= avgGradient(4) * alpha * dampening;
+        doFs[i](5) -= avgGradient(5) * alpha * dampening;
+    }
+
+    if (verbose)
+    {
+        std::cout << "Mass descent step. Average gradient: " << avgGradient << "\t avgError: " << avgError / board_height / board_width 
+            << "\t dampening factor: " << dampening << std::endl;
+    }
 }
 
 float minErrorOverDegree(Mat_<float>& doF, Mat_<float>& doFstep, std::vector<Point2f>& points, int steps, int degree)
@@ -257,36 +289,38 @@ void dofGradient(Mat_<float>& doF, std::vector<Point2f>& points) {
         plt::subplot(2, 3, d + 1);
         Mat_<float> doFstep{ doF.size() };
         doFstep << 0, 0, 0, 0, 0, 0, 0, 0, 0;
-        if (d < 3) { doFstep(d) = 0.00005; }
-        else { doFstep(d) = 0.001; }
+        if (d < 3) { doFstep(d) = 0.000005; }
+        else { doFstep(d) = 0.0002; }
         //doFstep(d) = 0.002;// getGradient(doF, points)(d) / 30000;
-        analyzeGradient(doF, doFstep, points, 200, to_string(d), d);
+        analyzeGradient(doF, doFstep, points, 2000, to_string(d), d);
     }
     plt::show(true);
     //plt::pause(1);
 }
 
-void setup_calibration(int board_width, int board_height, float square_size, vector<string>& images) {
+void setup_calibration(int board_width, int board_height, float square_size, vector<string>& imagePaths) {
     Size board_size = Size(board_width, board_height);
+    std::vector< Point2f > corners;
+    Mat gray;
     int board_n = board_width * board_height;
     int count = 0;
-    for (auto j : images) {
+    for (auto j : imagePaths) {
         gray = cv::imread(j, cv::IMREAD_GRAYSCALE);
-        std::cout << count << std::endl;
+        std::cout << "Image nr " << count << std::endl;
         count++;
-        char img_file[100];
-        //cv::cvtColor(i, gray, COLOR_BGR2GRAY);
-
         bool found = false;
-
         found = cv::findChessboardCorners(gray, board_size, corners,
             CALIB_CB_ADAPTIVE_THRESH | CALIB_CB_FILTER_QUADS);
   
-        
         if (found)
         {
             cornerSubPix(gray, corners, cv::Size(5, 5), cv::Size(-1, -1),
                 TermCriteria(TermCriteria::EPS | TermCriteria::MAX_ITER, 30, 0.1));
+            // If corners indexes are flipped: flip back
+            if (corners[0].x > corners[1].x) {
+                std::cout << "Reversing" << std::endl;
+                reverse(corners.begin(), corners.end());
+            }
             drawChessboardCorners(gray, board_size, corners, found);
         }
         
@@ -296,143 +330,188 @@ void setup_calibration(int board_width, int board_height, float square_size, vec
                 obj.push_back(Point3f((float)j * square_size, (float)i * square_size, 0));
 
         if (found) {
-            //cout << k << ". Found corners!" << endl;
-            std::cout << corners.size() << ", " << obj.size() << std::endl;
+            std::cout << "Found " << corners.size() << " corners in the image" << std::endl;
             image_points.push_back(corners);
             object_points.push_back(obj);
         }
     }
 }
 
-double computeReprojectionErrors(const vector< vector< Point3f > >& objectPoints,
-    const std::vector< std::vector< Point2f > >& imagePoints,
-    const std::vector< Mat >& rvecs, const vector< Mat >& tvecs,
-    const Mat& cameraMatrix, const Mat& distCoeffs) {
-    std::vector< Point2f > imagePoints2;
-    int i, totalPoints = 0;
-    double totalErr = 0, err;
-    std::vector< float > perViewErrors;
-    perViewErrors.resize(objectPoints.size());
-
-    for (i = 0; i < (int)objectPoints.size(); ++i) {
-        projectPoints(Mat(objectPoints[i]), rvecs[i], tvecs[i], cameraMatrix,
-            distCoeffs, imagePoints2);
-        err = cv::norm(Mat(imagePoints[i]), Mat(imagePoints2), NORM_L2);
-        int n = (int)objectPoints[i].size();
-        perViewErrors[i] = (float)std::sqrt(err * err / n);
-        totalErr += err * err;
-        totalPoints += n;
+void get2DPattern(Method method, string imageFolder)
+{
+    if (method == Method::Calculate) {
+        /// Find 2D pattern points in images
+        vector<string> imagePaths = getImagesPathsFromFolder(imageFolder);
+        setup_calibration(board_width, board_height, square_size, imagePaths);
+        FileStorage file(calibrationFolderName + "/Points", FileStorage::WRITE);
+        file << "object_points" << object_points;
+        file << "image_points" << image_points;
+        file.release();
     }
-    return std::sqrt(totalErr / totalPoints);
+    else if (method == Method::Import) {
+        /// Read 2D pattern points from file
+        FileStorage file(calibrationFolderName + "/Points", FileStorage::READ);
+        file["image_points"] >> image_points;
+        file["object_points"] >> object_points;
+        file.release();
+    }
 }
 
-
-int main()
+void getIntrinsicCameraData(Method method) 
 {
-    /// Find 2d pattern points in images
-    //vector<string> images = getImagesPathsFromFolder("TestImgsCamPos");
-    //setup_calibration(board_width, board_height, square_size, images);
-    //FileStorage file("Points", FileStorage::WRITE);
-    //file << "object_points" << object_points;
-    //file << "image_points" << image_points;
-    //file.release();
-    //return 1;
+    if (method == Method::Calculate) {
+        /// Calculate intrinsic camera calibration info
+        std::vector<Mat> rvecs, tvecs;
+        Mat stdInt, stdEx, perViewErrors;
+        std::cout << calibrateCamera(object_points, image_points, imageSize, K, D, rvecs, tvecs, stdInt, stdEx, perViewErrors) << std::endl;
+        FileStorage fs(calibrationFolderName + "/CalibrationFile3", FileStorage::WRITE);
+        fs << "K" << K;
+        fs << "D" << D;
+        fs << "board_width" << board_width;
+        fs << "board_height" << board_height;
+        fs << "square_size" << square_size;
+        fs.release();
+        printf("Done Calibration\n");
+    }
+    else if (method == Method::Import) {
+        /// Read intrinsic camera calibration info from file
+        FileStorage fs(calibrationFolderName + "/CalibrationFile3", FileStorage::READ);
+        fs["K"] >> K;
+        fs["D"] >> D;
+        fs.release();
+    }
+}
 
-    /// Read 2d pattern points from file
-    //FileStorage file("Points", FileStorage::READ);
-    //file["image_points"] >> image_points;
-    //file["object_points"] >> object_points;
-    std::vector< std::vector< Point2f > > undistorted_image_points;
-    FileStorage undist("UndistortedPoints", FileStorage::READ);
-    undist["points"] >> undistorted_image_points;
-
-    /// Read intrinsic camera calibration info from file
-    FileStorage fs("CalibrationFile2", FileStorage::READ);
-    fs["K"] >> K;
-    fs["D"] >> D;
-    
-    /// Undistort detected 2D points
-    //for (auto pointsDist : image_points) {
-    //    vector<Point2f> points;
-    //    undistortPoints(pointsDist, points, K, D);
-    //    for (int i = 0; i < points.size(); i++) {
-    //        points[i] = Point2f{ points[i].x * imageSize.width + imageSize.width / 2, points[i].y * imageSize.height + imageSize.height / 2 };
-    //    }
-    //    undistorted_image_points.push_back(points);
-    //}
-    //FileStorage undist("UndistortedPoints", FileStorage::WRITE);
-    //undist << "points" << undistorted_image_points;
-    //undist.release();
-
-    FileStorage campos("campos", FileStorage::WRITE);
-    vector<Mat> doFs;
-    vector<float> errors;
-    int counter = 1;
-    for (std::vector< Point2f > points : undistorted_image_points) {
-        std::cout << "Point: " << counter << std::endl;
-        counter++;
-
-        Mat_<float> doF{ Size(6,1) };
-        //doF << 0, 0, 0.75,
-                //0, 0, 0;
-        doF << 0.34649482, 0.19480404, 0.79643202, -0.092996247, 0.30407393, 0.37667418;
-
-        //plotPerformance(projectChessGrid(generateChessGrid(doF)), points);
-        //dofGradient(doF, points);
-
-        float alpha = 1e-3;
-        /// Perform initial gradient descent
-        for (int i = 0; i < 2000; i++) {
-            //doF = minimizeErrorWithDoF(doF, points, 0.02, 200);
-            //std::cout << doF << std::endl;
-            gradientDescentStep(doF, points, alpha, false);
-            //waitKey(0);
-            //plotPerformance(projectChessGrid(generateChessGrid(doF)), points);
-            //dofGradient(doF, points);
+void getUndistorted2DPattern(Method method)
+{
+    if (method == Method::Calculate) {
+        /// Undistort detected 2D points
+        for (auto distortedPoints : image_points) {
+            vector<Point2f> points;
+            undistortPoints(distortedPoints, points, K, D, noArray(), K);
+            undistorted_image_points.push_back(points);
         }
-        std::cout << "doF: " << doF << std::endl;
-        float error = getError(doF, points) / board_height / board_width;
-        if (error > 30) {
-            for (int i = 0; i < 10; i++) {
-                gradientDescentStep(doF, points, alpha, true);
-                plotPerformance(projectChessGrid(generateChessGrid(doF)), points);
-                dofGradient(doF, points);
+        FileStorage undist(calibrationFolderName + "/UndistortedPoints", FileStorage::WRITE);
+        undist << "points" << undistorted_image_points;
+        undist.release();
+    }
+    else if (method == Method::Import) {
+        /// Read undistorted 2d pattern points from file
+        FileStorage undist(calibrationFolderName + "/UndistortedPoints", FileStorage::READ);
+        undist["points"] >> undistorted_image_points;
+        undist.release();
+    }
+}
+
+void estimatePatternDoFs(Method method)
+{
+    if (method == Method::Calculate) 
+    {
+        vector<float> errors;
+        int counter = 0;
+
+        for (std::vector< Point2f > points : undistorted_image_points) {
+            std::cout << "Calibrating pattern nr: " << counter << std::endl;
+            Point2f centerPoint = points[(board_height * board_width - 1) / 2] - Point2f(imageSize / 2);
+            float guessDepth = 0.94;
+            Point3f initEstimate = { centerPoint.x * guessDepth / preMult, centerPoint.y * guessDepth / preMult, guessDepth };
+            Mat_<float> doF{ Size(6,1) };
+            doF << initEstimate.x, initEstimate.y, initEstimate.z,
+                0, 0, 0;
+            float preError = getError(doF, points) / board_height / board_width;
+
+            /// Perform initial gradient descent
+            for (int i = 0; i < 20000; i++) {
+                gradientDescentStep(doF, points, alpha, false);
             }
+            float error = getError(doF, points) / board_height / board_width;
+            if (error > 1) {
+                std::cout << "Error too large: " << error << std::endl;
+                for (int i = 0; i < 10; i++) {
+                    gradientDescentStep(doF, points, alpha, true);
+                    plotPerformance(projectChessGrid(generateChessGrid(doF)), points);
+                    dofGradient(doF, points);
+                }
+            }
+
+            doFs.push_back(doF);
+
+            std::cout << "doF: " << doF << std::endl;
+            std::cout << "Error from initial estimate: " << preError << ". Error after gradient descent: " << error << std::endl;
+            errors.push_back(error);
+            counter++;
         }
 
-        doFs.push_back(doF);
-        
-        std::cout << "Error: " << error << std::endl;
-        errors.push_back(error);
+        FileStorage doFsFile(calibrationFolderName + "/doFs", FileStorage::WRITE);
+        doFsFile << "doFs" << doFs;
+        doFsFile << "rep_err" << errors;
+        doFsFile.release();
+        for (auto doF : doFs)
+        {
+            std::cout << doF << std::endl;
+        }
+        for (auto error : errors)
+        {
+            std::cout << error << std::endl;
+        }
+    }
+    else if (method == Method::Import)
+    {
+        FileStorage doFsFile(calibrationFolderName + "/doFs", FileStorage::READ);
+        doFsFile["doFs"] >> doFs;
+        doFsFile.release();
     }
     
-    campos << "doFs" << doFs;
-    campos << "rep_err" << errors;
-    campos.release();
+}
+
+void estimateJointPatternDoFs(Method method)
+{
+    // take average z, a, b, c for all DoFs, since they should be equal.
+    Mat_<float> meanDoF{ doFs[0].size() };
     for (auto doF : doFs)
+    {
+        meanDoF += doF;
+    }
+    meanDoF /= doFs.size();
+    for (int i = 0; i < doFs.size(); i++) {
+        jointDoFs.push_back(doFs[i]);
+        for (int d = 2; d < doFs[i].cols; d++) {
+            jointDoFs[i](d) = meanDoF(d);
+        }
+    }
+    for (int i = 0; i < 3000; i++)
+    {
+        massGradientDescentStep(jointDoFs, undistorted_image_points, alpha * 1e-1, true);
+    }
+    FileStorage jointDoFsFile(calibrationFolderName + "/jointDoFs", FileStorage::WRITE);
+    jointDoFsFile << "jointDoFs" << jointDoFs;
+    jointDoFsFile.release();
+    for (auto doF : jointDoFs)
     {
         std::cout << doF << std::endl;
     }
-    for (auto error : errors)
-    {
-        std::cout << error << std::endl;
-    }
+    std::cout << "Finished mass gradient descent." << std::endl;
+}
 
-    
-    //calibrateCamera(object_points, image_points, gray.size(), K, D, rvecs, tvecs, stdInt, stdEx, perViewErrors, flag);
+int main()
+{
+    imageFolderName = "Series1";
+    calibrationFolderName = "calibration";  // Foldername for files containing calibration data
+    alpha = 5e-3;                           // Multiplier for gradient in gradient descent
+    imageSize = Size{ 4056, 3040 };
+    board_width = 7, board_height = 5;
+    square_size = 28.7e-3;
 
-    //solvePnP(object_points, image_points, K, D, rvec, tvec, false);
-    //cout << rvec << endl;
-
-    //cout << "Calibration error: " << computeReprojectionErrors(object_points, image_points, rvecs, tvecs, K, D) << endl;
-
-    //FileStorage fs("CalibrationFile2", FileStorage::WRITE);
-    //fs << "K" << K;
-    //fs << "D" << D;
-    //fs << "board_width" << board_width;
-    //fs << "board_height" << board_height;
-    //fs << "square_size" << square_size;
-    //printf("Done Calibration\n");
+    /// Calculate and export OR import image and object points. Stored in image_points and object_points.
+    get2DPattern(Method::Import, imageFolderName);
+    /// Calculate and export OR import intrinsic camera data. Stored in K and D.
+    getIntrinsicCameraData(Method::Import);
+    /// Calculate and export OR import undistorted image points. Stored in undistorted_image_points.
+    getUndistorted2DPattern(Method::Import);
+    /// Calculate and export OR import the position and rotation of the calibration pattern with respect to each camera. Stored in DoFs.
+    estimatePatternDoFs(Method::Import);
+    /// Calculates the joint pattern DoFs, taking into account that the angles and depth of the pattern are equal for all cameras.
+    estimateJointPatternDoFs(Method::Calculate);
 
     return 0;
 }
