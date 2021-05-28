@@ -10,3 +10,4 @@ Plots/
 x64/
 
 *.dll
+/processedImages
