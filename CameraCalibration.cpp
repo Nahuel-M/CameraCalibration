@@ -6,6 +6,7 @@ const float  PI = 3.14159265358979f;
 #include <iostream>
 #include <iomanip>
 #include <sys/stat.h>
+#include <filesystem>
 
 #include <opencv2/calib3d/calib3d.hpp>
 #include <opencv2/highgui/highgui.hpp>
@@ -24,7 +25,7 @@ std::vector< std::vector< Point2f > > undistorted_image_points;
 std::vector< std::vector< Point3f > > object_points; 
 vector<cv::Mat_<float>> doFs;
 vector<cv::Mat_<float>> jointDoFs;
-float avgAngle;
+Mat_<float> rotationMatrix;
 string imageFolderName;
 string outputFolderName;
 string calibrationFolderName = "calibration";
@@ -70,14 +71,17 @@ inline std::vector<cv::Point3f> generateChessGrid(cv::Mat_<float> doF)
 /// Project a chess grid (or any other set of points) to a camera located at O(0,0,0) with no rotation
 inline std::vector<cv::Point2f> projectChessGrid(std::vector<cv::Point3f> points3D)
 {
+	float data[3] = { 0,0,0 };
 	std::vector<cv::Point2f> points2D;
-	for (auto &p : points3D)
-	{
-		points2D.push_back(Point2f{ preMult * p.x / p.z + (float)imageSize.width/2, preMult * p.y / p.z + (float)imageSize.height/2});
-	}
+	//Point2f pPoint = { (float)K.at<double>(0,3), (float)K.at<double>(1,3) };
+	//for (auto &p : points3D)
+	//{
+	//	points2D.push_back(Point2f{ preMult * p.x / p.z + pPoint.x, preMult * p.y / p.z + pPoint.y});
+	//}
+	projectPoints(points3D, Mat{ Size{3,1}, CV_32F, data }, Mat{ Size{3,1}, CV_32F, data }, K, Mat{}, points2D);
 	return points2D;
 }
-
+/// Plot an image of the 2D point vector
 void plot2Dpoints(std::vector<cv::Point2f>& points2D)
 {
 	Mat_<uchar> plot{ imageSize };
@@ -90,7 +94,7 @@ void plot2Dpoints(std::vector<cv::Point2f>& points2D)
 	cv::namedWindow("Plot", cv::WindowFlags::WINDOW_AUTOSIZE);
 	cv::imshow("Plot", plot);
 }
-
+/// Plot the 2D point vector and the goal 2D point vector. Good for debugging
 void plotPerformance(std::vector<cv::Point2f> points2D, std::vector<cv::Point2f> goal)
 {
 	Mat_<uchar> plot{ imageSize };
@@ -116,7 +120,7 @@ void plotPerformance(std::vector<cv::Point2f> points2D, std::vector<cv::Point2f>
 	cv::namedWindow("Performance", cv::WindowFlags::WINDOW_AUTOSIZE);
 	cv::imshow("Performance", plot);
 }
-
+/// Calculate the position of the pattern points in the image, using the pattern DoF (position, orientation), and find the error with the target points
 inline float getError(Mat_<float>& doF, std::vector<Point2f>& points)
 {
 	float error = 0;
@@ -129,7 +133,7 @@ inline float getError(Mat_<float>& doF, std::vector<Point2f>& points)
 	}
 	return error;
 }
-
+/// Find a numerical gradient by getting the error difference for a small step in the desired index.
 inline float subGradientNumerical(Mat_<float>& doF, std::vector<Point2f>& points, int index, float stepSize)
 {
 	float minError = 0;
@@ -143,7 +147,7 @@ inline float subGradientNumerical(Mat_<float>& doF, std::vector<Point2f>& points
 
 	return getError(maxDof, points) - getError(minDof, points);
 }
-
+/// Get a gradient for every value in the doF by iterating over the indexes
 inline Mat_<float> getGradient(Mat_<float>& doF, std::vector<Point2f>& points, bool verbose = false)
 {
 	Mat_<float> gradient{ doF.size() };
@@ -200,7 +204,7 @@ void analyzeGradient(Mat_<float>& doF, Mat_<float>& doFstep, std::vector<Point2f
 	}
    
 }
-
+/// Do a single gradient descent step
 void gradientDescentStep(Mat_<float>& doF, std::vector<Point2f>& points,float alpha, bool verbose = false)
 {
    
@@ -224,7 +228,7 @@ void gradientDescentStep(Mat_<float>& doF, std::vector<Point2f>& points,float al
 		std::cout << "doF: " << doF << std::endl;
 	}
 }
-
+/// Do a joint gradient descent step for all cameras together
 void jointGradientDescentStep(std::vector<Mat_<float>>& doFs, std::vector<std::vector<Point2f>>& pointSets, float alpha, bool verbose = false)
 {
 	// Get individual gradient for each camera
@@ -564,100 +568,177 @@ void estimatePatternDoFs(Method method)
 
 void estimateJointPatternDoFs(Method method)
 {
-	// take average z, a, b, c for all DoFs, since they should be equal.
-	Mat_<float> meanDoF = Mat::zeros(doFs[0].size(), doFs[0].type());
-	for (auto &doF : doFs)
+	if (method == Method::Calculate)
 	{
-		meanDoF += doF;
-	}
-	meanDoF /= doFs.size();
-
-	std::cout << "Starting joint gradient descent. Average DoF: " << meanDoF << std::endl;
-	/// Setting angles and Z position of the pattern to the mean of the estimations
-	for (int i = 0; i < doFs.size(); i++) {
-		jointDoFs.push_back(doFs[i]);
-		for (int d = 2; d < doFs[i].cols; d++) {
-			jointDoFs[i](d) = meanDoF(d);
-		}
-	}
-	/// Setting dampening matrix back to undampened
-	dampening = 1;
-
-	for (int i = 0; i < 20000; i++)
-	{
-		if (i % 100 == 0)
+		// take average z, a, b, c for all DoFs, since they should be equal.
+		Mat_<float> meanDoF = Mat::zeros(doFs[0].size(), doFs[0].type());
+		for (auto& doF : doFs)
 		{
-			std::cout << i << " ";
-			jointGradientDescentStep(jointDoFs, undistorted_image_points, alpha * 2e-1, true);
+			meanDoF += doF;
 		}
-		else {
-			jointGradientDescentStep(jointDoFs, undistorted_image_points, alpha * 2e-1, false);
+		meanDoF /= doFs.size();
+
+		std::cout << "Starting joint gradient descent. Average DoF: " << meanDoF << std::endl;
+		/// Setting angles and Z position of the pattern to the mean of the estimations
+		for (int i = 0; i < doFs.size(); i++) {
+			jointDoFs.push_back(doFs[i]);
+			for (int d = 2; d < doFs[i].cols; d++) {
+				jointDoFs[i](d) = meanDoF(d);
+			}
 		}
-	}
-	std::cout << "Reprojection errors per camera: ";
-	for (int e = 0; e < jointDoFs.size(); e++)
-	{
-		std::cout << getError(jointDoFs[e], undistorted_image_points[e]) / board_height / board_width << ", ";
-	}
-	std::cout << std::endl;
-	/// Setting camera X and Y positions relative to center camera
-	Mat centerDof = jointDoFs[(jointDoFs.size() - 1) / 2](Rect{ 0,0,2,1 }).clone();
-	for (auto& DoF : jointDoFs)
-	{
-		DoF(Rect{ 0,0,2,1 }) -= centerDof;
-		std::cout << DoF << std::endl;
-	}
+		/// Setting dampening matrix back to undampened
+		dampening = 1;
 
-	FileStorage jointDoFsFile(calibrationFolderName + "/jointDoFs", FileStorage::WRITE);
-	jointDoFsFile << "jointDoFs" << jointDoFs;
-	jointDoFsFile.release();
+		for (int i = 0; i < 20000; i++)
+		{
+			if (i % 100 == 0)
+			{
+				std::cout << i << " ";
+				jointGradientDescentStep(jointDoFs, undistorted_image_points, alpha * 2e-1, true);
+			}
+			else {
+				jointGradientDescentStep(jointDoFs, undistorted_image_points, alpha * 2e-1, false);
+			}
+		}
+		std::cout << "Reprojection errors per camera: ";
+		for (int e = 0; e < jointDoFs.size(); e++)
+		{
+			std::cout << getError(jointDoFs[e], undistorted_image_points[e]) / board_height / board_width << ", ";
+		}
+		std::cout << std::endl;
+		/// Setting camera X and Y positions relative to center camera
+		//Mat centerDof = jointDoFs[(jointDoFs.size() - 1) / 2](Rect{ 0,0,2,1 }).clone();
+		//for (auto& DoF : jointDoFs)
+		//{
+		//	DoF(Rect{ 0,0,2,1 }) -= centerDof;
+		//	std::cout << DoF << std::endl;
+		//}
 
-	std::cout << "Finished mass gradient descent." << std::endl;
+		FileStorage jointDoFsFile(calibrationFolderName + "/jointDoFs", FileStorage::WRITE);
+		jointDoFsFile << "jointDoFs" << jointDoFs;
+		jointDoFsFile.release();
+
+		std::cout << "Finished mass gradient descent." << std::endl;
+	}
+	else if (method == Method::Import)
+	{
+		FileStorage jointDoFsFile(calibrationFolderName + "/jointDoFs", FileStorage::READ);
+		jointDoFsFile["jointDoFs"] >> jointDoFs;
+		jointDoFsFile.release();
+	}
 }
 
-void estimateCameraAngles(float estimatedCamDistance)
+float getAngleDiff(float angle1, float angle2)
 {
-	vector<cv::Mat_<float>> goalDoFs;
-	for (auto &DoF : jointDoFs)
+	if (angle1 - angle2 > PI / 2)
+		return angle1 - angle2 - PI;
+	else if (abs(angle1 - angle2) < PI / 2)
+		return angle1 - angle2;
+	else
+		return angle1 - angle2 + PI;
+}
+/// Find the camera orientation and export the location
+void exportCamLocations(string outputFolderName, float estimatedCamDistance = 0.05)
+{
+	std::vector<Point3f> camPos;
+	Point3f centerCamPos = Point3f{ -jointDoFs[12](0), -jointDoFs[12](1), -jointDoFs[12](2) };
+	for (auto& doF : jointDoFs)
 	{
-		//std::cout << "b " << DoF << std::endl;
-		Mat_<float > goalDoF = DoF.clone();
-		goalDoF(0) = round(goalDoF(0) / estimatedCamDistance);
-		goalDoF(1) = round(goalDoF(1) / estimatedCamDistance);
-		goalDoFs.push_back(goalDoF);
-		//std::cout << "a " << DoF << std::endl;
+		camPos.push_back(Point3f{ -doF(0), -doF(1), -doF(2) } - centerCamPos);
 	}
-	avgAngle = 0;
-	for (int d = 0; d < jointDoFs.size(); d++)
+	float yaw = 0, pitch = 0, roll = 0;
+	vector<Point3f> targetPositions;
+	for (auto& pos : camPos)
 	{
-		float angle;
-		if (abs(jointDoFs[d](1)) + abs(jointDoFs[d](0)) > estimatedCamDistance/2)
-		{
-			angle = atan2f(jointDoFs[d](1), jointDoFs[d](0));
-		}
+		Point3f targetPos = pos;
+		targetPos.x = round(targetPos.x / estimatedCamDistance) * estimatedCamDistance;
+		targetPos.y = round(targetPos.y / estimatedCamDistance) * estimatedCamDistance;
+		targetPos.z = round(targetPos.z / estimatedCamDistance) * estimatedCamDistance;
+		targetPositions.push_back(targetPos);
+	}
+
+	float avgAngleX = 0;
+	float totalArm = 0;
+	for (int d = 0; d < camPos.size(); d++)
+	{
+		float angleX;
+		if (abs(camPos[d].x) + abs(camPos[d].y) > estimatedCamDistance / 2)
+			angleX = atan2f(camPos[d].z, camPos[d].y);
 		else
-		{
-			angle = 0;
-		}
-		float goalAngle = atan2f(goalDoFs[d](1), goalDoFs[d](0));
-		float diff;
-		if (angle - goalAngle > PI/2) 
-		{
-			diff = angle - goalAngle - PI;
-		}
-		else if (abs(angle - goalAngle) < PI / 2)
-		{
-			diff = angle - goalAngle;
-		}
-		else 
-		{
-			diff = angle - goalAngle + PI;
-		}
-		avgAngle += diff;
-		std::cout << "angles " << angle << ", " << goalAngle << ", " << diff << std::endl;
+			angleX = 0;
+		float goalAngleX = atan2f(targetPositions[d].z, targetPositions[d].y);
+		float diff = -getAngleDiff(angleX, goalAngleX);
+		float arm = cv::norm(Point2f{ targetPositions[d].z, targetPositions[d].y });
+		totalArm += arm;
+		avgAngleX += diff * arm;
+		//std::cout << "pos " << camPos[d] << ", " << targetPositions[d] << std::endl;
+		//std::cout << "angles " << angleX << ", " << goalAngleX << ", " << diff << std::endl;
 	}
-	avgAngle /= jointDoFs.size() - 1;
-	std::cout << "Average angle of cameras: "<< avgAngle << std::endl;
+	avgAngleX /= totalArm;
+	std::cout << "Average X angle of cameras: " << avgAngleX << std::endl;
+	float rotationXdata[9] = { 1, 0, 0,   0, cos(avgAngleX), -sin(avgAngleX),    0, sin(avgAngleX), cos(avgAngleX) };
+	Mat_<float> RotationX = Mat{ Size{3,3}, CV_32F, rotationXdata };
+	for (Point3f& pos : camPos)
+		pos = (Point3f)Mat(RotationX * Mat(pos));
+
+	float avgAngleY = 0;
+	totalArm = 0;
+	for (int d = 0; d < camPos.size(); d++)
+	{
+		float angleY;
+		if (abs(camPos[d].x) + abs(camPos[d].y) > estimatedCamDistance / 2)
+			angleY = atan2f(camPos[d].z, camPos[d].x);
+		else
+			angleY = 0;
+		float goalAngleY = atan2f(targetPositions[d].z, targetPositions[d].x);
+		float diff = getAngleDiff(angleY, goalAngleY);
+		float arm = cv::norm(Point2f{ targetPositions[d].z, targetPositions[d].x });
+		totalArm += arm;
+		avgAngleY += diff * arm;
+		//std::cout << "angles " << angleY << ", " << goalAngleY << ", " << diff << std::endl;
+	}
+	avgAngleY /= totalArm;
+	std::cout << "Average Y angle of cameras: " << avgAngleY << std::endl;
+	float rotationYdata[9] = { std::cos(avgAngleY), 0, sin(avgAngleY),   0, 1, 0,    -sin(avgAngleY), 0, cos(avgAngleY) };
+	Mat_<float> RotationY = Mat{ Size{3,3}, CV_32F, rotationYdata };
+	//std::cout << RotationY << std::endl;
+	for (Point3f& pos : camPos)
+		pos = (Point3f)Mat(RotationY * Mat(pos));
+
+	float avgAngleZ = 0;
+	totalArm = 0;
+	for (int d = 0; d < camPos.size(); d++)
+	{
+		float angleZ;
+		if (abs(camPos[d].x) + abs(camPos[d].y) > estimatedCamDistance / 2)
+			angleZ = atan2f(camPos[d].y, camPos[d].x);
+		else
+			angleZ = 0;
+		float goalAngleZ = atan2f(targetPositions[d].y, targetPositions[d].x);
+		float diff = -getAngleDiff(angleZ, goalAngleZ);
+		float arm = cv::norm(Point2f{ targetPositions[d].y, targetPositions[d].x });
+		totalArm += arm;
+		avgAngleZ += diff * arm;
+		//std::cout << "angles " << angleZ << ", " << goalAngleZ << ", " << diff << std::endl;
+	}
+	avgAngleZ /= totalArm;
+	std::cout << "Average Z angle of cameras: " << avgAngleZ << std::endl;
+	float rotationZdata[9] = { cos(avgAngleZ), -sin(avgAngleZ), 0,    sin(avgAngleZ), cos(avgAngleZ), 0,    0, 0, 1 };
+	Mat_<float> RotationZ = Mat{ Size{3,3}, CV_32F, rotationZdata };
+	for (Point3f& pos : camPos) {
+		pos = (Point3f)Mat(RotationZ * Mat(pos));
+		pos.y = -pos.y;
+		std::cout << pos << ";" << std::endl;
+	}
+
+	rotationMatrix = RotationZ * RotationY * RotationX;
+	std::cout << "Rotation matrix: " << rotationMatrix << std::endl;
+	std::filesystem::create_directory(std::filesystem::path(outputFolderName));
+	FileStorage camPosFile(outputFolderName + "/cameraPosition.xyz", FileStorage::WRITE);
+	camPosFile << "camera_positions" << camPos;
+	camPosFile << "camera_focal_length" << 5.f;
+	camPosFile << "camera_pixel_size" << 1.55e-3f;
+	camPosFile.release();
 }
 
 void exportImages(string imageFolderName, string outputFolderName)
@@ -665,7 +746,8 @@ void exportImages(string imageFolderName, string outputFolderName)
 	Mat map1, map2;
 	vector<string> imagePaths = getImagesPathsFromFolder(imageFolderName);
 	Mat sample = cv::imread(imagePaths[0], cv::IMREAD_GRAYSCALE);
-	cv::initUndistortRectifyMap(K, D, Mat(), K, sample.size(), sample.type(), map1, map2);
+	cv::initUndistortRectifyMap(K, D, rotationMatrix, K, sample.size(), sample.type(), map1, map2);
+
 	Mat gray;
 	for (int i = 0; i < imagePaths.size(); i++) {
 		// Undistort
@@ -715,31 +797,11 @@ void exportImages(string imageFolderName, string outputFolderName)
 	}
 }
 
-void exportCamLocations(string outputFolderName)
-{
-	std::vector<Point3f> camPos;
-	float cos_a = cos(-avgAngle);
-	float sin_a = sin(-avgAngle);
-	for (auto& doF : jointDoFs)
-	{
-		//camPos.push_back(Point3f{ -(cos_a * doF(0) - sin_a * doF(1)), (sin_a * doF(0) + cos_a * doF(1)), doF(2) });
-		camPos.push_back(Point3f{ -doF(0), doF(1), doF(2) });
-		doF(0) = -camPos.back().x;
-		doF(1) = camPos.back().y;
-		std::cout << camPos.back() << std::endl;
-	}
-	FileStorage camPosFile(outputFolderName + "/cameraPosition.xyz", FileStorage::WRITE);
-	camPosFile << "camera_positions" << camPos;
-	camPosFile << "camera_focal_length" << 5.f;
-	camPosFile << "camera_pixel_size" << 1.55e-3f;
-	camPosFile.release();
-}
-
 int main()
 {
-	imageFolderName = "sourceImages\\\\CalibrationBol5";		// Folder name for images
-	outputFolderName = "processedImages\\\CalibrationBol5";
-	calibrationFolderName = "calibration2";			// Folder name for files containing calibration data
+	imageFolderName = "sourceImages\\\\Series12";	// Folder name for images
+	outputFolderName = "processedImages\\\Series12Undistorted";
+	calibrationFolderName = "calibration";			// Folder name for files containing calibration data
 	alpha = 1.5e-2;									// Multiplier for gradient in gradient descent
 	board_width = 8, board_height = 6;				// Calibration pattern dimensions
 	square_size = 2e-2;//28.7e-3;//43.2e-3			// Calibration pattern pitch (in meters)
@@ -755,11 +817,9 @@ int main()
 	estimatePatternDoFs(Method::Calculate);
 	/// Estimate the joint pattern DoFs, taking into account that the angles and depth of the pattern are equal for all cameras. Stored in jointDoFs.
 	estimateJointPatternDoFs(Method::Calculate);
-	/// Estimate camera angle around Z-axis (orthogonal to camera plane)
-	estimateCameraAngles(camera_distance);
 	/// Apply rotation to points and move from pattern doF to 
-	exportCamLocations(outputFolderName);
+	exportCamLocations(outputFolderName, camera_distance);
 	/// Apply rotation to images to compensate for camera angle.
-	//exportImages(imageFolderName, outputFolderName);
+	exportImages(imageFolderName, outputFolderName);
 	return 0;
 }
